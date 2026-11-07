@@ -1,0 +1,17 @@
+[package]
+name = "wt-worktree"
+version = "0.1.0"
+edition = "2024"
+description = "Interactive Git worktree manager"
+license = "MIT"
+
+[[bin]]
+name = "wt"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+dialoguer = "0.11"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+which = "7"

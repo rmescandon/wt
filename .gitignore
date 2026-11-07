@@ -1,0 +1,15 @@
+*.doc
+*.docx
+*.xls
+*.xlsx
+*.xlsm
+*.xlsb
+*.ppt
+*.pptx
+*.pps
+*.ppsx
+
+
+# Added by cargo
+
+/target
