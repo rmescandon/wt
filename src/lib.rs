@@ -330,7 +330,7 @@ mod tests {
         assert_eq!(executable, "osascript");
         assert!(args[1].contains("tell application \"Ghostty\""));
         assert!(args[1].contains("initial working directory of cfg"));
-        assert!(args[1].contains("command of cfg"));
+        assert!(args[1].contains("set command of cfg to \"nvim '/tmp/project folder'\""));
 
         assert_eq!(
             crate::terminal::terminal_argv(TerminalKind::Kitty, "linux", path, command),

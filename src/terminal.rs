@@ -247,7 +247,7 @@ fn ghostty_applescript(path: &str, terminal_command: &str) -> String {
     format!(
         "tell application \"Ghostty\"\n activate\n set cfg to new surface configuration\n set initial working directory of cfg to {}\n set command of cfg to {}\n set win to front window\n set newTab to new tab in win with configuration cfg\nend tell",
         applescript_string(path),
-        applescript_string(&format!("shell:{terminal_command}"))
+        applescript_string(terminal_command)
     )
 }
 

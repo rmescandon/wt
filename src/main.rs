@@ -79,9 +79,13 @@ fn open_worktree(config: &Config, destination: &std::path::Path) -> Result<()> {
     let command = if terminal_editor {
         config.editor.terminal_command(destination)
     } else {
-        "exec \"${SHELL:-/bin/sh}\"".to_string()
+        shell_handoff_command()
     };
     terminal::open_tab(config.terminal, destination, &command)
+}
+
+fn shell_handoff_command() -> String {
+    "\"${SHELL:-/bin/sh}\"".to_string()
 }
 
 fn remove_flow() -> Result<()> {
@@ -101,5 +105,19 @@ mod tests {
         assert!(super::help_requested(&["-h".into()]));
         assert!(!super::help_requested(&[]));
         assert!(!super::help_requested(&["feature".into()]));
+    }
+
+    #[test]
+    fn shell_handoff_command_survives_ghostty_login_exec_wrapper() {
+        let script = format!("exec -l {}", super::shell_handoff_command());
+        let status = std::process::Command::new("/bin/bash")
+            .args(["--noprofile", "--norc", "-c", &script])
+            .env("SHELL", "/usr/bin/true")
+            .status()
+            .expect("run bash wrapper");
+        assert!(
+            status.success(),
+            "handoff command failed under exec -l wrapper: {status}"
+        );
     }
 }
