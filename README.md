@@ -45,7 +45,7 @@ From a Git project checkout:
 wt feature/my-change
 ```
 
-`wt` asks for confirmation, validates branch name, fetches `origin main` from repository root, then creates new branch and worktree from `origin/main`. Current working directory maps under configured worktree root using longest matching project-root prefix, preserving its path suffix. When cwd falls outside configured roots, destination is sibling to cwd at `../<branch>`.
+`wt` asks for confirmation and validates branch name. It reuses a matching local branch first; otherwise, it creates a local tracking branch from matching `origin/<branch>`. If neither branch exists, it fetches `origin/main` and creates the new branch from there. Remote lookup failures are reported rather than silently falling back. If the branch is already checked out in another worktree, `wt` reports that worktree's path. Current working directory maps under configured worktree root using longest matching project-root prefix, preserving its path suffix. When cwd falls outside configured roots, destination is sibling to cwd at `../<branch>`.
 
 Choose configured editors to launch. GUI editors open separately; terminal editors launch inside a new terminal tab at worktree path.
 

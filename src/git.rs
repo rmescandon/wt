@@ -225,23 +225,103 @@ pub fn fetch_origin_main(project: &Path) -> Result<()> {
 
 pub fn create_worktree(project: &Path, destination: &Path, branch: &str) -> Result<()> {
     validate_branch(branch)?;
-    fetch_origin_main(project)?;
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)?;
+    let worktrees = checked_git(project, ["worktree", "list", "--porcelain"])?;
+    if let Some(existing) = parse_worktrees(&String::from_utf8_lossy(&worktrees.stdout))
+        .into_iter()
+        .find(|entry| !entry.prunable && entry.branch.as_deref() == Some(branch))
+    {
+        anyhow::bail!(
+            "branch '{branch}' is already checked out at {}",
+            existing.path.display()
+        );
     }
-    checked_git(
+
+    let local_branch = git(
         project,
         [
-            "worktree",
-            "add",
-            "-b",
-            branch,
-            destination
-                .to_str()
-                .context("worktree path is not valid Unicode")?,
-            "origin/main",
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
         ],
     )?;
+    if !local_branch.status.success() && local_branch.status.code() != Some(1) {
+        anyhow::bail!(
+            "check local branch '{branch}' failed: {}",
+            String::from_utf8_lossy(&local_branch.stderr).trim()
+        );
+    }
+    let destination = destination
+        .to_str()
+        .context("worktree path is not valid Unicode")?;
+    if local_branch.status.success() {
+        if let Some(parent) = Path::new(destination).parent() {
+            fs::create_dir_all(parent)?;
+        }
+        checked_git(project, ["worktree", "add", destination, branch])?;
+        return Ok(());
+    }
+
+    match origin_branch_exists(project, branch)? {
+        true => {
+            fetch_origin_branch(project, branch)?;
+            if let Some(parent) = Path::new(destination).parent() {
+                fs::create_dir_all(parent)?;
+            }
+            checked_git(
+                project,
+                [
+                    "worktree",
+                    "add",
+                    "--track",
+                    "-b",
+                    branch,
+                    destination,
+                    &format!("origin/{branch}"),
+                ],
+            )?;
+        }
+        false => {
+            fetch_origin_main(project)?;
+            if let Some(parent) = Path::new(destination).parent() {
+                fs::create_dir_all(parent)?;
+            }
+            checked_git(
+                project,
+                ["worktree", "add", "-b", branch, destination, "origin/main"],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn origin_branch_exists(project: &Path, branch: &str) -> Result<bool> {
+    let reference = format!("refs/heads/{branch}");
+    let output = git(
+        project,
+        ["ls-remote", "--exit-code", "--heads", "origin", &reference],
+    )?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    if output.status.code() == Some(2) {
+        return Ok(false);
+    }
+    anyhow::bail!(
+        "look up branch '{branch}' on origin failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+}
+
+fn fetch_origin_branch(project: &Path, branch: &str) -> Result<()> {
+    let reference = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
+    checked_git(project, ["fetch", "origin", reference.as_str()])
+        .with_context(|| format!("fetch origin branch {branch}"))?;
+    checked_git(
+        project,
+        ["config", "--add", "remote.origin.fetch", &reference],
+    )
+    .with_context(|| format!("configure origin tracking for branch {branch}"))?;
     Ok(())
 }
 

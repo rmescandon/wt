@@ -21,7 +21,7 @@ fn run() -> Result<()> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     if help_requested(&args) {
         println!(
-            "Usage: wt [--help] [branch]\n\n  wt <branch>  Create a confirmed worktree from origin/main\n  wt           Confirm removal of the current linked worktree"
+            "Usage: wt [--help] [branch]\n\n  wt <branch>  Create a confirmed worktree from local branch, origin, or origin/main\n  wt           Confirm removal of the current linked worktree"
         );
         return Ok(());
     }

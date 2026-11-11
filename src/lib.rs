@@ -31,9 +31,18 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .expect("clock after Unix epoch")
                 .as_nanos();
-            let path = std::env::temp_dir()
-                .join(format!("wt-worktree-test-{}-{unique}", std::process::id()));
-            fs::create_dir(&path).expect("create test directory");
+            let mut attempt = 0;
+            let path = loop {
+                let candidate = std::env::temp_dir().join(format!(
+                    "wt-worktree-test-{}-{unique}-{attempt}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&candidate) {
+                    Ok(()) => break candidate,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => attempt += 1,
+                    Err(error) => panic!("create test directory: {error}"),
+                }
+            };
             fs::write(path.join("gitconfig"), "[commit]\n\tgpgsign = false\n")
                 .expect("write isolated git config");
             Self(path)
@@ -63,6 +72,170 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    struct WorktreeFixture {
+        temporary: TestDirectory,
+        seed: PathBuf,
+        project: PathBuf,
+    }
+
+    impl WorktreeFixture {
+        fn new() -> Self {
+            let temporary = TestDirectory::new();
+            let origin = temporary.0.join("origin.git");
+            let seed = temporary.0.join("seed");
+            let project = temporary.0.join("project");
+            let origin_arg = origin.to_string_lossy();
+            run_git(
+                &temporary.0,
+                &["init", "--bare", "--initial-branch=main", &origin_arg],
+            );
+            fs::create_dir(&seed).expect("create seed repository");
+            run_git(&seed, &["init", "--initial-branch=main"]);
+            Self::configure_committer(&seed);
+            Self::commit_file(&seed, "README", "initial\n", "initial main");
+            run_git(&seed, &["remote", "add", "origin", &origin_arg]);
+            run_git(&seed, &["push", "-u", "origin", "main"]);
+            let project_arg = project.to_string_lossy();
+            run_git(
+                &temporary.0,
+                &[
+                    "clone",
+                    "--single-branch",
+                    "--branch",
+                    "main",
+                    &origin_arg,
+                    &project_arg,
+                ],
+            );
+            Self::configure_committer(&project);
+            Self {
+                temporary,
+                seed,
+                project,
+            }
+        }
+
+        fn configure_committer(directory: &Path) {
+            run_git(directory, &["config", "user.name", "Test"]);
+            run_git(directory, &["config", "user.email", "test@example.invalid"]);
+            run_git(directory, &["config", "commit.gpgsign", "false"]);
+        }
+
+        fn commit_file(directory: &Path, name: &str, contents: &str, message: &str) -> String {
+            fs::write(directory.join(name), contents).expect("write test commit file");
+            run_git(directory, &["add", name]);
+            run_git(directory, &["commit", "-m", message]);
+            run_git(directory, &["rev-parse", "HEAD"])
+        }
+
+        fn push_branch(&self, branch: &str) -> String {
+            run_git(&self.seed, &["checkout", "-b", branch]);
+            let commit = Self::commit_file(&self.seed, "branch.txt", branch, branch);
+            run_git(&self.seed, &["push", "-u", "origin", branch]);
+            commit
+        }
+    }
+
+    #[test]
+    fn create_worktree_reuses_existing_local_branch() {
+        let fixture = WorktreeFixture::new();
+        fixture.push_branch("topic");
+        run_git(&fixture.project, &["checkout", "-b", "topic"]);
+        let local_commit = WorktreeFixture::commit_file(
+            &fixture.project,
+            "local.txt",
+            "local branch commit",
+            "local topic",
+        );
+        run_git(&fixture.project, &["checkout", "main"]);
+        let destination = fixture.temporary.0.join("worktrees/topic");
+
+        crate::git::create_worktree(&fixture.project, &destination, "topic")
+            .expect("reuse existing local branch");
+
+        assert_eq!(run_git(&destination, &["rev-parse", "HEAD"]), local_commit);
+    }
+
+    #[test]
+    fn create_worktree_tracks_matching_origin_branch() {
+        let fixture = WorktreeFixture::new();
+        let branch = "feature/from-remote";
+        let remote_commit = fixture.push_branch(branch);
+        let destination = fixture.temporary.0.join("worktrees/feature/from-remote");
+
+        crate::git::create_worktree(&fixture.project, &destination, branch)
+            .expect("create worktree from matching origin branch");
+
+        assert_eq!(run_git(&destination, &["rev-parse", "HEAD"]), remote_commit);
+        assert_eq!(
+            run_git(&destination, &["rev-parse", "--abbrev-ref", "@{upstream}"]),
+            format!("origin/{branch}")
+        );
+    }
+
+    #[test]
+    fn create_worktree_falls_back_to_origin_main_for_missing_branch() {
+        let fixture = WorktreeFixture::new();
+        let main_commit = WorktreeFixture::commit_file(
+            &fixture.seed,
+            "advanced.txt",
+            "advanced main",
+            "advance main",
+        );
+        run_git(&fixture.seed, &["push", "origin", "main"]);
+        let destination = fixture.temporary.0.join("worktrees/new-topic");
+
+        crate::git::create_worktree(&fixture.project, &destination, "new-topic")
+            .expect("create missing branch from origin main");
+
+        assert_eq!(run_git(&destination, &["rev-parse", "HEAD"]), main_commit);
+    }
+
+    #[test]
+    fn create_worktree_reports_origin_lookup_failure_without_fallback() {
+        let fixture = WorktreeFixture::new();
+        run_git(
+            &fixture.project,
+            &["remote", "set-url", "origin", "/missing/origin.git"],
+        );
+        let destination = fixture.temporary.0.join("worktrees/new-topic");
+
+        let error = crate::git::create_worktree(&fixture.project, &destination, "new-topic")
+            .expect_err("report origin lookup failure");
+
+        assert!(format!("{error:#}").contains("look up branch"), "{error:#}");
+        assert!(!destination.exists());
+        assert!(run_git(&fixture.project, &["branch", "--list", "new-topic"]).is_empty());
+    }
+
+    #[test]
+    fn create_worktree_reports_branch_checked_out_in_another_worktree() {
+        let fixture = WorktreeFixture::new();
+        let branch = "already-checked-out";
+        let worktrees = fixture.temporary.0.join("worktrees");
+        fs::create_dir(&worktrees).expect("create worktree root");
+        let occupied = worktrees.join("occupied");
+        let occupied_arg = occupied.to_string_lossy();
+        run_git(
+            &fixture.project,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                &occupied_arg,
+                "origin/main",
+            ],
+        );
+        let destination = fixture.temporary.0.join("worktrees/new-copy");
+
+        let error = crate::git::create_worktree(&fixture.project, &destination, branch)
+            .expect_err("reject a branch checked out elsewhere");
+
+        assert!(format!("{error:#}").contains(&occupied.to_string_lossy().to_string()));
+        assert!(!destination.exists());
     }
 
     #[test]
