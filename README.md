@@ -49,7 +49,7 @@ wt feature/my-change
 
 Choose configured editors to launch. GUI editors open separately; terminal editors launch inside a new terminal tab at worktree path.
 
-Run `wt` with no arguments inside a linked worktree to see its path and branch and confirm removal. Removal refuses primary checkout, detached HEAD, or dirty worktrees. It runs `git worktree remove` on absolute worktree path, then `git branch -d` from primary checkout. Remote branches are never deleted; failed safe branch deletion leaves branch intact.
+Run `wt` with no arguments inside a linked worktree to see its path and branch and confirm removal. Removal refuses primary checkout, detached HEAD, dirty worktrees, or repositories with stale worktree registrations. After confirmation, it moves the worktree folder and all contents (including ignored files) to the system Trash, cleans up that worktree's Git registration, then runs `git branch -d` from primary checkout. Remote branches are never deleted; failed Git cleanup or safe branch deletion leaves the branch intact.
 
 No-argument first run only performs setup and exits. It never removes a checkout.
 

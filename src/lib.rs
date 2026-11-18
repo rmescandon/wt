@@ -658,11 +658,65 @@ mod tests {
     }
 
     #[test]
-    fn removal_prompt_warns_ignored_files_and_names_absolute_path() {
+    fn removal_prompt_explains_worktree_moves_to_trash() {
         let prompt = removal_prompt(Path::new("/worktrees/project/topic"));
         assert!(prompt.contains("/worktrees/project/topic"));
+        assert!(prompt.contains("Trash"));
         assert!(prompt.contains("ignored files"));
-        assert!(prompt.contains("delete"));
+        assert!(prompt.contains("safely merged"));
+    }
+
+    #[test]
+    fn stale_worktree_registrations_block_removal() {
+        let error = crate::git::ensure_no_prunable_worktrees(&[crate::git::WorktreeEntry {
+            path: PathBuf::from("/missing/worktree"),
+            branch: Some("stale".into()),
+            detached: false,
+            prunable: true,
+        }])
+        .expect_err("stale registration blocks removal");
+
+        assert!(error.to_string().contains("/missing/worktree"));
+    }
+
+    #[test]
+    fn trash_failure_preserves_path_and_reports_error() {
+        let temporary = TestDirectory::new();
+        let missing = temporary.0.join("missing-worktree");
+
+        let error =
+            crate::git::move_to_trash(&missing).expect_err("missing path cannot be trashed");
+
+        assert!(format!("{error:#}").contains("move"));
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn git_registration_can_be_cleaned_after_worktree_path_is_moved() {
+        let fixture = WorktreeFixture::new();
+        let worktree = fixture.temporary.0.join("worktrees/topic");
+        fs::create_dir_all(worktree.parent().expect("worktree parent"))
+            .expect("create worktree parent");
+        let worktree_arg = worktree.to_string_lossy();
+        run_git(
+            &fixture.project,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "topic",
+                &worktree_arg,
+                "origin/main",
+            ],
+        );
+
+        fs::remove_dir_all(&worktree).expect("simulate trash move");
+        crate::git::remove_worktree_registration(&fixture.project, &worktree)
+            .expect("clean registration for moved worktree");
+
+        let worktrees = run_git(&fixture.project, &["worktree", "list", "--porcelain"]);
+        assert!(!worktrees.contains("refs/heads/topic"));
+        assert!(!worktree.exists());
     }
 
     #[test]

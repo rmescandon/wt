@@ -327,9 +327,43 @@ fn fetch_origin_branch(project: &Path, branch: &str) -> Result<()> {
 
 pub fn removal_prompt(absolute_path: &Path) -> String {
     format!(
-        "Remove worktree at {} and delete local branch if safely merged? This deletes the folder and all contents, including ignored files. [y/N] ",
+        "Move worktree at {} to Trash, then delete local branch if safely merged? This moves folder and all contents, including ignored files. [y/N] ",
         absolute_path.display()
     )
+}
+
+pub fn move_to_trash(path: &Path) -> Result<()> {
+    trash::delete(path).with_context(|| format!("move {} to Trash", path.display()))
+}
+
+pub(crate) fn ensure_no_prunable_worktrees(worktrees: &[WorktreeEntry]) -> Result<()> {
+    let stale = worktrees
+        .iter()
+        .filter(|entry| entry.prunable)
+        .map(|entry| entry.path.display().to_string())
+        .collect::<Vec<_>>();
+    if !stale.is_empty() {
+        anyhow::bail!(
+            "refusing to remove worktree while stale worktree registrations exist: {}",
+            stale.join(", ")
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn remove_worktree_registration(primary: &Path, absolute: &Path) -> Result<()> {
+    checked_git(
+        primary,
+        [
+            "worktree",
+            "remove",
+            "--force",
+            absolute
+                .to_str()
+                .context("worktree path is not valid Unicode")?,
+        ],
+    )?;
+    Ok(())
 }
 
 pub fn remove_current_worktree(directory: &Path) -> Result<()> {
@@ -346,6 +380,10 @@ pub fn remove_current_worktree(directory: &Path) -> Result<()> {
     if is_dirty(&root)? {
         anyhow::bail!("refusing to remove dirty worktree");
     }
+    let worktrees = checked_git(&primary, ["worktree", "list", "--porcelain"])?;
+    ensure_no_prunable_worktrees(&parse_worktrees(&String::from_utf8_lossy(
+        &worktrees.stdout,
+    )))?;
     eprint!("{}", removal_prompt(&absolute));
     let mut answer = String::new();
     std::io::stdin().read_line(&mut answer)?;
@@ -353,20 +391,16 @@ pub fn remove_current_worktree(directory: &Path) -> Result<()> {
         println!("Cancelled.");
         return Ok(());
     }
-    checked_git(
-        &primary,
-        [
-            "worktree",
-            "remove",
-            absolute
-                .to_str()
-                .context("worktree path is not valid Unicode")?,
-        ],
-    )?;
+    move_to_trash(&absolute)?;
+    if let Err(error) = remove_worktree_registration(&primary, &absolute) {
+        anyhow::bail!(
+            "worktree moved to Trash, but Git registration cleanup failed; branch retained: {error:#}"
+        );
+    }
     let delete = git(&primary, ["branch", "-d", branch.as_str()])?;
     if !delete.status.success() {
         anyhow::bail!(
-            "worktree removed, branch retained: {}",
+            "worktree moved to Trash, branch retained: {}",
             String::from_utf8_lossy(&delete.stderr).trim()
         );
     }
