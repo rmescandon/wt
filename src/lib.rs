@@ -152,7 +152,9 @@ mod tests {
         run_git(&fixture.project, &["checkout", "main"]);
         let destination = fixture.temporary.0.join("worktrees/topic");
 
-        crate::git::create_worktree(&fixture.project, &destination, "topic")
+        let plan = crate::git::plan_worktree(&fixture.project, "main", "topic")
+            .expect("plan reuse existing local branch");
+        crate::git::create_worktree(&fixture.project, &destination, "topic", &plan)
             .expect("reuse existing local branch");
 
         assert_eq!(run_git(&destination, &["rev-parse", "HEAD"]), local_commit);
@@ -165,7 +167,9 @@ mod tests {
         let remote_commit = fixture.push_branch(branch);
         let destination = fixture.temporary.0.join("worktrees/feature/from-remote");
 
-        crate::git::create_worktree(&fixture.project, &destination, branch)
+        let plan = crate::git::plan_worktree(&fixture.project, "main", branch)
+            .expect("plan existing origin branch");
+        crate::git::create_worktree(&fixture.project, &destination, branch, &plan)
             .expect("create worktree from matching origin branch");
 
         assert_eq!(run_git(&destination, &["rev-parse", "HEAD"]), remote_commit);
@@ -187,10 +191,101 @@ mod tests {
         run_git(&fixture.seed, &["push", "origin", "main"]);
         let destination = fixture.temporary.0.join("worktrees/new-topic");
 
-        crate::git::create_worktree(&fixture.project, &destination, "new-topic")
+        let plan = crate::git::plan_worktree(&fixture.project, "main", "new-topic")
+            .expect("plan new branch from origin main");
+        assert_eq!(
+            plan.confirmation_detail("new-topic"),
+            "create from 'origin/main'"
+        );
+        crate::git::create_worktree(&fixture.project, &destination, "new-topic", &plan)
             .expect("create missing branch from origin main");
 
         assert_eq!(run_git(&destination, &["rev-parse", "HEAD"]), main_commit);
+    }
+
+    #[test]
+    fn linked_worktree_creates_new_branch_from_its_origin_branch() {
+        let fixture = WorktreeFixture::new();
+        let topic_commit = fixture.push_branch("topic");
+        crate::git::fetch_origin_branch(&fixture.project, "topic")
+            .expect("fetch linked worktree base branch");
+        let base = fixture.temporary.0.join("worktrees/topic");
+        let base_arg = base.to_string_lossy();
+        run_git(
+            &fixture.project,
+            &[
+                "worktree",
+                "add",
+                "--track",
+                "-b",
+                "topic",
+                &base_arg,
+                "origin/topic",
+            ],
+        );
+
+        let base_branch =
+            crate::git::base_branch_for_worktree(&base).expect("read linked worktree branch");
+        assert_eq!(base_branch, "topic");
+        let destination = fixture.temporary.0.join("worktrees/topic-child");
+        let plan = crate::git::plan_worktree(&base, &base_branch, "topic-child")
+            .expect("plan child branch from topic");
+        assert_eq!(
+            plan.confirmation_detail("topic-child"),
+            "create from 'origin/topic'"
+        );
+        crate::git::create_worktree(&base, &destination, "topic-child", &plan)
+            .expect("create child branch from origin topic");
+
+        assert_eq!(run_git(&destination, &["rev-parse", "HEAD"]), topic_commit);
+        assert_ne!(
+            run_git(&destination, &["rev-parse", "HEAD"]),
+            run_git(&fixture.project, &["rev-parse", "origin/main"])
+        );
+    }
+
+    #[test]
+    fn missing_origin_base_rejects_creation_without_falling_back_to_linked_head() {
+        let fixture = WorktreeFixture::new();
+        let destination = fixture.temporary.0.join("worktrees/new-topic");
+
+        let error = crate::git::plan_worktree(&fixture.project, "missing-base", "new-topic")
+            .expect_err("reject missing origin base");
+
+        assert!(
+            format!("{error:#}").contains("base branch 'origin/missing-base' does not exist"),
+            "{error:#}"
+        );
+        assert!(!destination.exists());
+        assert!(run_git(&fixture.project, &["branch", "--list", "new-topic"]).is_empty());
+    }
+
+    #[test]
+    fn detached_linked_worktree_cannot_supply_creation_base() {
+        let fixture = WorktreeFixture::new();
+        let detached = fixture.temporary.0.join("worktrees/detached");
+        let detached_arg = detached.to_string_lossy();
+        run_git(
+            &fixture.project,
+            &["worktree", "add", "--detach", &detached_arg, "origin/main"],
+        );
+
+        let error = crate::git::base_branch_for_worktree(&detached)
+            .expect_err("reject detached linked worktree");
+
+        assert!(format!("{error:#}").contains("detached HEAD worktree"));
+    }
+
+    #[test]
+    fn primary_checkout_uses_origin_main_as_creation_base() {
+        let fixture = WorktreeFixture::new();
+        run_git(&fixture.project, &["checkout", "-b", "local-only"]);
+
+        assert_eq!(
+            crate::git::base_branch_for_worktree(&fixture.project)
+                .expect("primary checkout always uses main"),
+            "main"
+        );
     }
 
     #[test]
@@ -202,7 +297,7 @@ mod tests {
         );
         let destination = fixture.temporary.0.join("worktrees/new-topic");
 
-        let error = crate::git::create_worktree(&fixture.project, &destination, "new-topic")
+        let error = crate::git::plan_worktree(&fixture.project, "main", "new-topic")
             .expect_err("report origin lookup failure");
 
         assert!(format!("{error:#}").contains("look up branch"), "{error:#}");
@@ -231,7 +326,7 @@ mod tests {
         );
         let destination = fixture.temporary.0.join("worktrees/new-copy");
 
-        let error = crate::git::create_worktree(&fixture.project, &destination, branch)
+        let error = crate::git::plan_worktree(&fixture.project, "main", branch)
             .expect_err("reject a branch checked out elsewhere");
 
         assert!(format!("{error:#}").contains(&occupied.to_string_lossy().to_string()));

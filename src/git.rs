@@ -14,6 +14,37 @@ pub struct WorktreeEntry {
     pub prunable: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeSource {
+    ExistingLocal,
+    ExistingOrigin,
+    SelectedBase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreePlan {
+    pub base_branch: String,
+    pub source: WorktreeSource,
+}
+
+impl WorktreePlan {
+    pub fn confirmation_detail(&self, branch: &str) -> String {
+        match self.source {
+            WorktreeSource::ExistingLocal => format!(
+                "reuse existing local branch '{branch}' (not created from 'origin/{}')",
+                self.base_branch
+            ),
+            WorktreeSource::ExistingOrigin => format!(
+                "track existing remote branch 'origin/{branch}' (not created from 'origin/{}')",
+                self.base_branch
+            ),
+            WorktreeSource::SelectedBase => {
+                format!("create from 'origin/{}'", self.base_branch)
+            }
+        }
+    }
+}
+
 pub fn map_worktree_path(
     current: &Path,
     roots: &[PathBuf],
@@ -177,6 +208,15 @@ pub fn primary_checkout(directory: &Path) -> Result<PathBuf> {
         .context("git worktree list returned no primary checkout")
 }
 
+pub fn base_branch_for_worktree(directory: &Path) -> Result<String> {
+    let root = repository_root(directory)?;
+    let primary = primary_checkout(&root)?;
+    if normalize(&root) == normalize(&primary) {
+        return Ok("main".to_owned());
+    }
+    branch_for_head(&root)?.context("cannot create worktree from a detached HEAD worktree")
+}
+
 pub fn primary_checkout_from_entries(worktrees: &[WorktreeEntry]) -> Option<PathBuf> {
     worktrees
         .iter()
@@ -190,7 +230,16 @@ pub fn is_dirty(directory: &Path) -> Result<bool> {
 }
 
 pub fn branch_for_head(directory: &Path) -> Result<Option<String>> {
-    let output = checked_git(directory, ["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    let output = git(directory, ["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    if !output.status.success() {
+        if output.status.code() == Some(1) {
+            return Ok(None);
+        }
+        anyhow::bail!(
+            "git failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
     let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Ok((!branch.is_empty()).then_some(branch))
 }
@@ -211,19 +260,24 @@ pub fn validate_branch(branch: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn fetch_origin_main(project: &Path) -> Result<()> {
+pub fn fetch_origin_branch(project: &Path, branch: &str) -> Result<()> {
+    let reference = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
+    checked_git(project, ["fetch", "origin", reference.as_str()])
+        .with_context(|| format!("fetch origin branch {branch}"))?;
     checked_git(
         project,
-        [
-            "fetch",
-            "origin",
-            "+refs/heads/main:refs/remotes/origin/main",
-        ],
-    )?;
+        ["config", "--add", "remote.origin.fetch", reference.as_str()],
+    )
+    .with_context(|| format!("configure origin tracking for branch {branch}"))?;
     Ok(())
 }
 
-pub fn create_worktree(project: &Path, destination: &Path, branch: &str) -> Result<()> {
+pub fn fetch_origin_main(project: &Path) -> Result<()> {
+    fetch_origin_branch(project, "main")
+}
+
+pub fn plan_worktree(project: &Path, base_branch: &str, branch: &str) -> Result<WorktreePlan> {
+    validate_branch(base_branch)?;
     validate_branch(branch)?;
     let worktrees = checked_git(project, ["worktree", "list", "--porcelain"])?;
     if let Some(existing) = parse_worktrees(&String::from_utf8_lossy(&worktrees.stdout))
@@ -251,23 +305,62 @@ pub fn create_worktree(project: &Path, destination: &Path, branch: &str) -> Resu
             String::from_utf8_lossy(&local_branch.stderr).trim()
         );
     }
+    if local_branch.status.success() {
+        return Ok(WorktreePlan {
+            base_branch: base_branch.to_owned(),
+            source: WorktreeSource::ExistingLocal,
+        });
+    }
+
+    if origin_branch_exists(project, branch)? {
+        return Ok(WorktreePlan {
+            base_branch: base_branch.to_owned(),
+            source: WorktreeSource::ExistingOrigin,
+        });
+    }
+
+    if !origin_branch_exists(project, base_branch)? {
+        anyhow::bail!(
+            "base branch 'origin/{base_branch}' does not exist; cannot create worktree '{branch}'"
+        );
+    }
+    Ok(WorktreePlan {
+        base_branch: base_branch.to_owned(),
+        source: WorktreeSource::SelectedBase,
+    })
+}
+
+pub fn create_worktree(
+    project: &Path,
+    destination: &Path,
+    branch: &str,
+    plan: &WorktreePlan,
+) -> Result<()> {
+    validate_branch(branch)?;
+    let worktrees = checked_git(project, ["worktree", "list", "--porcelain"])?;
+    if let Some(existing) = parse_worktrees(&String::from_utf8_lossy(&worktrees.stdout))
+        .into_iter()
+        .find(|entry| !entry.prunable && entry.branch.as_deref() == Some(branch))
+    {
+        anyhow::bail!(
+            "branch '{branch}' is already checked out at {}",
+            existing.path.display()
+        );
+    }
+
     let destination = destination
         .to_str()
         .context("worktree path is not valid Unicode")?;
-    if local_branch.status.success() {
-        if let Some(parent) = Path::new(destination).parent() {
-            fs::create_dir_all(parent)?;
-        }
-        checked_git(project, ["worktree", "add", destination, branch])?;
-        return Ok(());
+    if let Some(parent) = Path::new(destination).parent() {
+        fs::create_dir_all(parent)?;
     }
 
-    match origin_branch_exists(project, branch)? {
-        true => {
+    match plan.source {
+        WorktreeSource::ExistingLocal => {
+            checked_git(project, ["worktree", "add", destination, branch])?;
+        }
+        WorktreeSource::ExistingOrigin => {
             fetch_origin_branch(project, branch)?;
-            if let Some(parent) = Path::new(destination).parent() {
-                fs::create_dir_all(parent)?;
-            }
             checked_git(
                 project,
                 [
@@ -281,14 +374,18 @@ pub fn create_worktree(project: &Path, destination: &Path, branch: &str) -> Resu
                 ],
             )?;
         }
-        false => {
-            fetch_origin_main(project)?;
-            if let Some(parent) = Path::new(destination).parent() {
-                fs::create_dir_all(parent)?;
-            }
+        WorktreeSource::SelectedBase => {
+            fetch_origin_branch(project, &plan.base_branch)?;
             checked_git(
                 project,
-                ["worktree", "add", "-b", branch, destination, "origin/main"],
+                [
+                    "worktree",
+                    "add",
+                    "-b",
+                    branch,
+                    destination,
+                    &format!("origin/{}", plan.base_branch),
+                ],
             )?;
         }
     }
@@ -311,18 +408,6 @@ fn origin_branch_exists(project: &Path, branch: &str) -> Result<bool> {
         "look up branch '{branch}' on origin failed: {}",
         String::from_utf8_lossy(&output.stderr).trim()
     );
-}
-
-fn fetch_origin_branch(project: &Path, branch: &str) -> Result<()> {
-    let reference = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
-    checked_git(project, ["fetch", "origin", reference.as_str()])
-        .with_context(|| format!("fetch origin branch {branch}"))?;
-    checked_git(
-        project,
-        ["config", "--add", "remote.origin.fetch", &reference],
-    )
-    .with_context(|| format!("configure origin tracking for branch {branch}"))?;
-    Ok(())
 }
 
 pub fn removal_prompt(absolute_path: &Path) -> String {

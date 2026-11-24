@@ -49,7 +49,15 @@ fn run() -> Result<()> {
 }
 
 fn create_flow(config: &Config, branch: &str) -> Result<()> {
-    print!("Create worktree for branch '{branch}'? [Y/n] ");
+    validate_branch(branch)?;
+    let current = current_directory()?;
+    let project = git::repository_root(&current)?;
+    let base_branch = git::base_branch_for_worktree(&current)?;
+    let plan = git::plan_worktree(&project, &base_branch, branch)?;
+    print!(
+        "Create worktree for branch '{branch}' ({})? [Y/n] ",
+        plan.confirmation_detail(branch)
+    );
     io::stdout().flush()?;
     let mut answer = String::new();
     io::stdin().read_line(&mut answer)?;
@@ -57,16 +65,13 @@ fn create_flow(config: &Config, branch: &str) -> Result<()> {
         println!("Cancelled.");
         return Ok(());
     }
-    validate_branch(branch)?;
-    let current = current_directory()?;
-    let project = git::repository_root(&current)?;
     let destination = map_worktree_path(
         &current,
         &config.project_roots,
         &config.worktree_root,
         branch,
     );
-    create_worktree(&project, &destination, branch)?;
+    create_worktree(&project, &destination, branch, &plan)?;
     println!("Created worktree at {}", destination.display());
     open_worktree(config, &destination)
 }

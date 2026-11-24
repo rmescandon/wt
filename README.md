@@ -1,6 +1,6 @@
 # wt
 
-`wt` is an interactive Git worktree manager for macOS and Linux. It creates branches from `origin/main`, opens worktrees in selected editors, and can safely remove the current linked worktree.
+`wt` is an interactive Git worktree manager for macOS and Linux. It creates branches from `origin/main` when run in the primary checkout, or from the current branch's matching `origin/<branch>` when run in a linked worktree. It opens worktrees in selected editors and can safely remove the current linked worktree.
 
 ## Requirements
 
@@ -45,7 +45,7 @@ From a Git project checkout:
 wt feature/my-change
 ```
 
-`wt` asks for confirmation and validates branch name. It reuses a matching local branch first; otherwise, it creates a local tracking branch from matching `origin/<branch>`. If neither branch exists, it fetches `origin/main` and creates the new branch from there. Remote lookup failures are reported rather than silently falling back. If the branch is already checked out in another worktree, `wt` reports that worktree's path. Current working directory maps under configured worktree root using longest matching project-root prefix, preserving its path suffix. When cwd falls outside configured roots, destination is sibling to cwd at `../<branch>`.
+`wt` validates the branch name, checks the selected base on `origin`, then shows the base and action in its confirmation prompt. In the primary checkout, new branches use `origin/main`; in a linked worktree, they use `origin/<current-branch>`. If a linked worktree's branch does not exist on `origin`, creation stops without falling back. Detached linked worktrees cannot create new branches. A matching local destination branch is reused; otherwise, an existing `origin/<destination-branch>` is tracked. For these existing branches, confirmation states that selected base will not be used. If neither destination branch exists, `wt` creates one from the selected base. Remote lookup failures are reported rather than silently falling back. If the branch is already checked out in another worktree, `wt` reports that worktree's path. Current working directory maps under configured worktree root using longest matching project-root prefix, preserving its path suffix. When cwd falls outside configured roots, destination is sibling to cwd at `../<branch>`.
 
 Choose configured editors to launch. GUI editors open separately; terminal editors launch inside a new terminal tab at worktree path.
 
