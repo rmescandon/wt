@@ -1,5 +1,6 @@
 pub mod config;
 pub mod editor;
+pub mod env_files;
 pub mod git;
 pub mod setup;
 pub mod terminal;

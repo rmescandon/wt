@@ -4,8 +4,10 @@ use std::{
 };
 
 use anyhow::Result;
+use dialoguer::{Confirm, theme::ColorfulTheme};
 use wt_worktree::{
     config::{Config, config_path},
+    env_files::{copy_env_files, find_env_files},
     git::{self, create_worktree, current_directory, map_worktree_path, validate_branch},
     setup, terminal,
 };
@@ -71,7 +73,27 @@ fn create_flow(config: &Config, branch: &str) -> Result<()> {
         &config.worktree_root,
         branch,
     );
+    let env_files = find_env_files(&project)?;
+    let copy_env = if env_files.is_empty() {
+        false
+    } else {
+        println!("Found .env files:");
+        for path in &env_files {
+            println!("  {}", path.display());
+        }
+        Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("Copy all .env files to the new worktree?")
+            .default(true)
+            .interact()?
+    };
     create_worktree(&project, &destination, branch, &plan)?;
+    if copy_env {
+        if let Err(error) = copy_env_files(&project, &destination, &env_files) {
+            eprintln!("No .env files copied: {error:#}");
+        } else {
+            println!("Copied {} .env file(s).", env_files.len());
+        }
+    }
     println!("Created worktree at {}", destination.display());
     open_worktree(config, &destination)
 }
